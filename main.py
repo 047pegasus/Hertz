@@ -12,8 +12,8 @@ from textual_plotext import PlotextPlot
 
 # Constants
 DEFAULT_HOST = "localhost"
-DEFAULT_INTERVAL = 15  # seconds
-GRAPH_INTERVAL = 30  # seconds
+DEFAULT_INTERVAL = 10  # seconds
+GRAPH_INTERVAL = 5  # seconds
 CONFIG_FILE = "hertz_config.json"
 
 # Modal for adding a new service
@@ -49,11 +49,31 @@ class AddServiceModal(ModalScreen):
                     "check_interval": int(interval),
                     "history": []  # Initialize history for new services
                 })
-
             else:
                 self.dismiss(None)
         elif event.button.id == "cancel":
             self.dismiss(None)
+
+class ErrorScreen(ModalScreen):
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label("Error"),
+            Label(self.message),
+            Button("OK", id="ok"),
+            id="error-modal",
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "ok":
+            self.dismiss()
+    
+    def key_q(self):
+        """Handle 'q' key press to quit the application."""
+        self.action_quit()
 
 # Main Hertz application
 class HertzDashboard(App):
@@ -199,7 +219,6 @@ class HertzDashboard(App):
     def update_service_row(self, service):
         """Update the service row in the DataTable."""
         try:
-
             table = self.query_one("#services-table", DataTable)
             history = service.get("history", [])
             last_status = history[-1]["status"] if history else "UNKNOWN"
@@ -209,7 +228,6 @@ class HertzDashboard(App):
             if row_key is not None:
                 table.update_cell(row_key, self.column_keys["Status"], last_status)
                 table.update_cell(row_key, self.column_keys["Last Check"], last_check)
-
         except Exception as e:
             self.show_error(f"Failed to update service row: {str(e)}")
 
@@ -217,17 +235,18 @@ class HertzDashboard(App):
         """Update the Plotext graph for the selected service."""
         if self.current_service:
             graph = self.query_one("#uptime-graph", PlotextPlot)
-            graph.refresh()
             plt = graph.plt
             history = self.current_service.get("history", [])
             timestamps = [entry["timestamp"].strftime("%H:%M:%S") for entry in history[-30:]]
             latencies = [entry["latency"] for entry in history[-30:]]
             
-            plt.plot(timestamps, latencies, marker="braille", label= "Latency (s)")
+            plt.clear_data()
+            plt.plot(timestamps, latencies, marker="dot")
             plt.title("Uptime Monitoring")
             plt.xlabel("Time")
             plt.ylabel("Latency (s)")
-            plt.ylim(0, max(latencies) + 1)
+            plt.grid(True)
+            graph.refresh()
 
     def update_status(self, message: str):
         """Update the status bar with a message."""
@@ -235,14 +254,7 @@ class HertzDashboard(App):
 
     def show_error(self, message: str):
         """Display an error message in a modal."""
-        self.app.push_screen(
-            ModalScreen(
-                Vertical(
-                    Label(f"Error: {message}"),
-                    Button("OK", variant="error"),
-                )
-            )
-        )
+        self.app.push_screen(ErrorScreen(message))
 
     @on(DataTable.RowSelected)
     async def show_service_details(self, event: DataTable.RowSelected):
@@ -274,7 +286,7 @@ class HertzDashboard(App):
     def action_quit(self):
         """Quit the application."""
         self.exit()
-
+        
     def key_a(self):
         """Handle 'a' key press to add a service."""
         self.action_add_service()
