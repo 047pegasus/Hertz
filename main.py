@@ -1,273 +1,288 @@
-from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical
-from textual.widgets import Header, Footer, Static, Button, Input, DataTable, Label
-from textual.reactive import reactive
-from textual.screen import Screen
-from textual.binding import Binding
-from rich.text import Text
-from textual.message import Message
-import asyncio
-import aiohttp
-from datetime import datetime
+import httpx
 import json
-import os
+from datetime import datetime
+from pathlib import Path
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.reactive import reactive
+from textual.widgets import Header, Footer, DataTable, Static, Input, Button, Label
+from textual.containers import Vertical, Horizontal, ScrollableContainer
+from textual.screen import ModalScreen
+from textual_plotext import PlotextPlot
 
-class ServiceConfig:
-    def __init__(self, name: str, url: str, path: str = "/", check_interval: int = 30):
-        self.name = name
-        self.url = url
-        self.path = path
-        self.check_interval = check_interval
-        self.status = "Unknown"
-        self.last_check = None
-        self.response_time = None
+# Constants
+DEFAULT_HOST = "localhost"
+DEFAULT_INTERVAL = 15  # seconds
+GRAPH_INTERVAL = 30  # seconds
+CONFIG_FILE = "hertz_config.json"
 
-class AddServiceModal(Screen):
-    BINDINGS = [("escape", "app.pop_screen", "Close")]
-
+# Modal for adding a new service
+class AddServiceModal(ModalScreen):
     def compose(self) -> ComposeResult:
-        yield Container(
-            Label("Add New Service", classes="modal-title"),
-            Input(placeholder="Service Name", id="service_name"),
-            Input(placeholder="Host:Port (e.g., localhost:8080)", id="host_port"),
-            Input(placeholder="Path (default: /)", id="path", value="/"),
-            Input(placeholder="Check Interval (seconds)", id="interval", value="30"),
+        yield Vertical(
+            Label("Add New Service"),
+            Input(placeholder="Service Name", id="name-input"),
+            Input(value=DEFAULT_HOST, placeholder="Host", id="host-input"),
+            Input(placeholder="Port", id="port-input"),
+            Input(placeholder="Path (optional)", id="path-input"),
+            Input(placeholder="Check Interval (seconds)", id="interval-input"),
             Horizontal(
-                Button("Add", variant="primary", id="add"),
                 Button("Cancel", variant="error", id="cancel"),
-                classes="modal-buttons"
+                Button("Add", variant="success", id="add"),
             ),
-            classes="modal-container"
+            id="add-service-modal",
         )
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "add":
-            name = self.query_one("#service_name").value
-            host_port = self.query_one("#host_port").value
-            path = self.query_one("#path").value
-            interval = self.query_one("#interval").value
-
-            if not all([name, host_port]):
-                self.app.push_screen(ErrorModal("All fields are required!"))
-                return
-
-            try:
-                interval = int(interval)
-            except ValueError:
-                self.app.push_screen(ErrorModal("Interval must be a number!"))
-                return
-
-            # Construct the full URL
-            if not host_port.startswith(("http://", "https://")):
-                host_port = f"http://{host_port}"
-
-            service = ServiceConfig(name, host_port, path, interval)
-            self.app.get_screen(MainScreen).add_service(service)
-            self.app.pop_screen()
-        else:
-            self.app.pop_screen()
-
-class ErrorModal(Screen):
-    def __init__(self, message: str):
-        super().__init__()
-        self.message = message
-
-    def compose(self) -> ComposeResult:
-        yield Container(
-            Label("Error", classes="modal-title error"),
-            Static(self.message),
-            Button("OK", variant="primary", id="ok"),
-            classes="modal-container"
-        )
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.app.pop_screen()
-
-class ServiceStatus(Container):
-    def __init__(self, service: ServiceConfig):
-        super().__init__()
-        self.service = service
-        self._status = Label("Status: Unknown", id="status-label")
-        self._last_check = Label("Last Check: Never", id="last-check-label")
-        self._response_time = Label("Response Time: N/A", id="response-time-label")
-
-    def compose(self) -> ComposeResult:
-        yield Label(self.service.name, classes="service-name")
-        yield Static(self.service.url + self.service.path, classes="service-url")
-        yield self._status
-        yield self._last_check
-        yield self._response_time
-
-    def update_status(self, status: str) -> None:
-        self._status.update(f"Status: {status}")
-
-    def update_last_check(self, last_check: str) -> None:
-        self._last_check.update(f"Last Check: {last_check}")
-
-    def update_response_time(self, response_time: str) -> None:
-        self._response_time.update(f"Response Time: {response_time}")
-
-class MainScreen(Screen):
-    BINDINGS = [
-        Binding("q", "quit", "Quit", show=True),
-        Binding("a", "add_service", "Add Service", show=True),
-    ]
-
-    def __init__(self):
-        super().__init__()
-        self.services: list[ServiceConfig] = []
-        self.service_widgets: dict[str, ServiceStatus] = {}
-
-    def compose(self) -> ComposeResult:
-        yield Header()
-        yield Container(id="dashboard")
-        yield Footer()
-
-    def on_mount(self) -> None:
-        self.load_config()
-
-    def action_add_service(self) -> None:
-        self.app.push_screen(AddServiceModal())
-
-    def add_service(self, service: ServiceConfig) -> None:
-        self.services.append(service)
-        self.save_config()
-        service_widget = ServiceStatus(service)
-        self.service_widgets[service.name] = service_widget
-        self.query_one("#dashboard").mount(service_widget)
-        asyncio.create_task(self.monitor_service(service_widget))
-
-    async def monitor_service(self, widget: ServiceStatus) -> None:
-        service = widget.service
-        async with aiohttp.ClientSession() as session:
-            while True:
-                try:
-                    start_time = datetime.now()
-                    url = f"{service.url.rstrip('/')}{service.path}"
-                    
-                    async with session.get(url) as response:
-                        end_time = datetime.now()
-                        response_time = (end_time - start_time).total_seconds() * 1000
-                        
-                        if response.status == 200:
-                            widget.update_status("UP")
-                            widget.update_response_time(f"{response_time:.2f}ms")
-                        else:
-                            widget.update_status(f"DOWN ({response.status})")
-                            widget.update_response_time("N/A")
-                            
-                except Exception as e:
-                    widget.update_status(f"ERROR: {str(e)}")
-                    widget.update_response_time("N/A")
-                
-                widget.update_last_check(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                await asyncio.sleep(service.check_interval)
-
-    def save_config(self) -> None:
-        config = [{
-            "name": service.name,
-            "url": service.url,
-            "path": service.path,
-            "check_interval": service.check_interval
-        } for service in self.services]
-        
-        with open("hertz_config.json", "w") as f:
-            json.dump(config, f)
-
-    def load_config(self) -> None:
-        if not os.path.exists("hertz_config.json"):
-            return
+            name = self.query_one("#name-input", Input).value.strip()
+            host = self.query_one("#host-input", Input).value.strip()
+            port = self.query_one("#port-input", Input).value.strip()
+            path = self.query_one("#path-input", Input).value.strip() or "/"
+            interval = self.query_one("#interval-input", Input).value.strip() or str(DEFAULT_INTERVAL)
             
-        try:
-            with open("hertz_config.json", "r") as f:
-                config = json.load(f)
-                
-            for service_config in config:
-                service = ServiceConfig(
-                    service_config["name"],
-                    service_config["url"],
-                    service_config["path"],
-                    service_config["check_interval"]
-                )
-                self.add_service(service)
-        except Exception as e:
-            self.app.push_screen(ErrorModal(f"Error loading config: {str(e)}"))
+            if name and host and port and interval:
+                self.dismiss({
+                    "name": name,
+                    "url": f"http://{host}:{port}",
+                    "path": path,
+                    "check_interval": int(interval),
+                    "history": []  # Initialize history for new services
+                })
 
-class HertzApp(App):
+            else:
+                self.dismiss(None)
+        elif event.button.id == "cancel":
+            self.dismiss(None)
+
+# Main Hertz application
+class HertzDashboard(App):
     CSS = """
     Screen {
-        align: center middle;
+        layout: grid;
+        grid-size: 2 1;
+        grid-columns: 2fr 3fr;
     }
-
-    .modal-container {
-        width: 60;
-        height: auto;
-        border: thick $background 80%;
-        background: $surface;
-        padding: 1 2;
-    }
-
-    .modal-title {
-        text-align: center;
-        width: 100%;
-        text-style: bold;
-    }
-
-    .modal-title.error {
-        color: red;
-    }
-
-    .modal-buttons {
-        width: 100%;
-        height: 3;
-        align: center middle;
-    }
-
-    #dashboard {
-        width: 100%;
+    
+    #services-container {
         height: 100%;
-        background: $surface;
+        border: solid $accent;
+        margin: 1;
+    }
+    
+    #graph-container {
+        height: 100%;
+        border: solid $accent;
+        margin: 1;
+    }
+    
+    #services-table {
+        width: 100%;
+        height: 100%;  /* Ensure the table takes full height */
+    }
+    
+    #status-bar {
+        height: 15%;
+        border: solid $accent;
+        margin: 1;
         padding: 1;
     }
-
-    ServiceStatus {
-        width: 100%;
+    
+    #add-service-modal {
+        padding: 2;
+        width: 50;
         height: auto;
-        border: solid $primary;
-        margin: 1 0;
-        padding: 1 2;
-        background: $panel;
-    }
-
-    .service-name {
-        text-style: bold;
-        color: $primary;
-    }
-
-    .service-url {
-        color: $text-muted;
-    }
-
-    #status-label, #last-check-label, #response-time-label {
-        margin-top: 1;
-    }
-
-    Input {
-        margin: 1 0;
-    }
-
-    Button {
-        margin: 1 1;
+        background: $surface;
     }
     """
 
+    # Reactive state for monitored applications
+    services = reactive([])
+    current_service = reactive(None)
+    status = reactive("Ready")
+    
+    row_keys = {}
+    column_keys = {}
+
     def compose(self) -> ComposeResult:
-        yield MainScreen()
+        yield Header()
+        yield ScrollableContainer(DataTable(id="services-table"), id="services-container")
+        yield Vertical(
+            PlotextPlot(id="uptime-graph"),  # Use PlotextPlot
+            id="graph-container"
+        )
+        yield Static(id="status-bar")
+        yield Footer()
 
     def on_mount(self) -> None:
-        self.install_screen(MainScreen(), name="main")
-        self.push_screen("main")
+        # Load services from config file if it exists
+        self.load_services_from_config()
+        
+        # Initialize the dashboard
+        self.set_interval(DEFAULT_INTERVAL, self.check_services)
+        self.set_interval(GRAPH_INTERVAL, self.update_graph)
+        self.update_status("Press 'a' to add a service | 'q' to quit")
+        self.init_graph()
 
+    def load_services_from_config(self):
+        """Load services from hertz_config.json if it exists."""
+        config_file = Path(CONFIG_FILE)
+        if config_file.exists():
+            try:
+                with open(config_file, "r") as f:
+                    services = json.load(f)
+                    self.services = services
+                    table = self.query_one("#services-table", DataTable)
+                    column_keys = table.add_columns("Name", "URL", "Path", "Status", "Last Check")
+                    self.column_keys = {
+                        "Name": column_keys[0],
+                        "URL": column_keys[1],
+                        "Path": column_keys[2],
+                        "Status": column_keys[3],
+                        "Last Check": column_keys[4],
+                    }
+                    for service in services:
+                        row_key = table.add_row(
+                            service["name"],
+                            service["url"],
+                            service["path"],
+                            "PENDING",
+                            "N/A",
+                        )
+                        self.row_keys[service["name"]] = row_key
+            except Exception as e:
+                self.show_error(f"Failed to load config: {str(e)}")
+
+    def save_services_to_config(self):
+        """Save services to hertz_config.json."""
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(self.services, f, indent=4)
+        except Exception as e:
+            self.show_error(f"Failed to save config: {str(e)}")
+
+    def init_graph(self):
+        """Initialize the Plotext graph."""
+        graph = self.query_one("#uptime-graph", PlotextPlot)
+        plt = graph.plt
+        plt.date_form("H:M:S")
+        plt.title("Uptime Monitoring")
+        plt.xlabel("Time")
+        plt.ylabel("Latency (s)")
+        plt.grid(True)
+
+    @work
+    async def check_services(self) -> None:
+        """Check the uptime of all monitored services."""
+        for service in self.services:
+            url = f"{service['url']}{service['path']}"
+            try:
+                async with httpx.AsyncClient() as client:
+                    start = datetime.now()
+                    response = await client.get(url, timeout=5)
+                    latency = (datetime.now() - start).total_seconds()
+                    status = "UP" if response.status_code == 200 else "DOWN"
+            except Exception as e:
+                status = "ERROR"
+                latency = 0
+                self.show_error(str(e))
+
+            if "history" not in service:
+                service["history"] = []  # Ensure history is initialized
+            service["history"].append({
+                "timestamp": datetime.now(),
+                "status": status,
+                "latency": latency
+            })
+            self.update_service_row(service)
+
+    def update_service_row(self, service):
+        """Update the service row in the DataTable."""
+        try:
+
+            table = self.query_one("#services-table", DataTable)
+            history = service.get("history", [])
+            last_status = history[-1]["status"] if history else "UNKNOWN"
+            last_check = history[-1]["timestamp"].strftime("%H:%M:%S") if history else "N/A"
+            # Get the row key for the service
+            row_key = self.row_keys.get(service["name"])
+            if row_key is not None:
+                table.update_cell(row_key, self.column_keys["Status"], last_status)
+                table.update_cell(row_key, self.column_keys["Last Check"], last_check)
+
+        except Exception as e:
+            self.show_error(f"Failed to update service row: {str(e)}")
+
+    async def update_graph(self):
+        """Update the Plotext graph for the selected service."""
+        if self.current_service:
+            graph = self.query_one("#uptime-graph", PlotextPlot)
+            graph.refresh()
+            plt = graph.plt
+            history = self.current_service.get("history", [])
+            timestamps = [entry["timestamp"].strftime("%H:%M:%S") for entry in history[-30:]]
+            latencies = [entry["latency"] for entry in history[-30:]]
+            
+            plt.plot(timestamps, latencies, marker="braille", label= "Latency (s)")
+            plt.title("Uptime Monitoring")
+            plt.xlabel("Time")
+            plt.ylabel("Latency (s)")
+            plt.ylim(0, max(latencies) + 1)
+
+    def update_status(self, message: str):
+        """Update the status bar with a message."""
+        self.query_one("#status-bar", Static).update(message)
+
+    def show_error(self, message: str):
+        """Display an error message in a modal."""
+        self.app.push_screen(
+            ModalScreen(
+                Vertical(
+                    Label(f"Error: {message}"),
+                    Button("OK", variant="error"),
+                )
+            )
+        )
+
+    @on(DataTable.RowSelected)
+    async def show_service_details(self, event: DataTable.RowSelected):
+        """Handle row selection to show service details."""
+        if event.row_index is not None and event.row_index < len(self.services):
+            self.current_service = self.services[event.row_index]
+            await self.update_graph()
+
+    def action_add_service(self):
+        """Open the modal to add a new service."""
+        def add_service_callback(result):
+            if result:
+                self.services.append(result)
+                table = self.query_one("#services-table", DataTable)
+                row_key = table.add_row(
+                    result["name"],
+                    result["url"],
+                    result["path"],
+                    "PENDING",
+                    "N/A"
+                )
+                self.row_keys[result["name"]] = row_key
+                self.save_services_to_config()
+                self.update_status(f"Added new service: {result['name']}")
+                table.refresh()
+
+        self.push_screen(AddServiceModal(add_service_callback))
+
+    def action_quit(self):
+        """Quit the application."""
+        self.exit()
+
+    def key_a(self):
+        """Handle 'a' key press to add a service."""
+        self.action_add_service()
+
+    def key_q(self):
+        """Handle 'q' key press to quit the application."""
+        self.action_quit()
+
+# Run the application
 if __name__ == "__main__":
-    app = HertzApp()
-    app.run()
+    HertzDashboard().run()

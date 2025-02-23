@@ -1,1 +1,1 @@
-[{"name": "Test Service", "url": "http://localhost:3000", "path": "/", "check_interval": 30}]
+[{"name": "Test Service", "url": "http://localhost:3000", "path": "/", "check_interval": 3}]
