@@ -768,14 +768,8 @@ class HertzDashboard(App):
                 # Clear the details if no service is selected
                 service_details = self.query_one("#service-details", Static)
                 service_details.update("No service selected")
-                # Clear the graph
-                try:
-                    self.graph.clear_data()
-                    self.graph.xlabel("Time")
-                    self.graph.ylabel("Latency (ms)")
-                    self.graph.title("Service Latency Over Time")
-                except Exception as e:
-                    print(f"[DEBUG] Error clearing graph: {e}")
+                # Update the graph to show all services or clear it if no services
+                self.update_latency_graph()
                 return
                 
             service_details = self.query_one("#service-details", Static)
@@ -814,44 +808,9 @@ class HertzDashboard(App):
                 service_history = self.get_service_history(service_id)
                 print(f"[DEBUG] Got history with {len(service_history)} entries")
                 
-                # Get latency of all services
-                try:
-                    # Extract latency values and ensure they are valid numbers
-                    latency_data = []
-                    for entry in service_history:
-                        latency = entry.get("latency")
-                        if latency is not None and isinstance(latency, (int, float)):
-                            latency_data.append(float(latency) * 1000)  # Convert to ms
+                # Update the graph with all services' latency data
+                self.update_latency_graph(selected_service_id=service_id)
                     
-                    print(f"[DEBUG] Latency data for {service['name']}: {latency_data}")
-                    
-                    # Update the graph with latency data
-                    try:
-                        print(f"[DEBUG] Updating graph with {len(latency_data)} data points")
-                        self.graph.clear_data()
-                        self.graph.xlabel("Time")
-                        self.graph.ylabel("Latency (ms)")
-                        self.graph.title(f"Latency for {service['name']}")
-                        
-                        # Only plot if we have data
-                        if latency_data and len(latency_data) > 0:
-                            # Ensure we have at least two data points for plotting
-                            if len(latency_data) == 1:
-                                # If only one point, duplicate it to have at least two points
-                                latency_data = latency_data + latency_data
-                            
-                            # Create a simple plot with the data
-                            self.graph.clear_figure()
-                            self.graph.plot(latency_data, label=service['name'])
-                    except Exception as e:
-                        print(f"[DEBUG] Error updating graph: {e}")
-                        import traceback
-                        traceback.print_exc()
-                except Exception as e:
-                    print(f"[DEBUG] Error processing latency data: {e}")
-                    import traceback
-                    traceback.print_exc()
-                        
                 # Generate and add history summary
                 if service_history:
                     details_text += "\n[bold]Service History:[/bold]\n"
@@ -874,6 +833,77 @@ class HertzDashboard(App):
                 
         except Exception as e:
             print(f"[DEBUG] Error updating service details: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def update_latency_graph(self, selected_service_id=None):
+        """
+        Updates the graph to display latency data for all services.
+        If selected_service_id is provided, that service will be highlighted.
+        If no services are present, clears the graph.
+        """
+        try:
+            print(f"[DEBUG] Updating latency graph with {len(self.services)} services")
+            self.graph.clear_data()
+            self.graph.clear_figure()
+            self.graph.xlabel("Time")
+            self.graph.ylabel("Latency (ms)")
+            
+            # If no services, just set a default empty graph
+            if not self.services:
+                self.graph.title("Service Latency Over Time")
+                service_details = self.query_one("#service-details", Static)
+                service_details.update("No services being monitored. Add a service to begin monitoring.")
+                return
+                
+            # Set graph title
+            if selected_service_id:
+                # Get the name of the selected service
+                selected_name = next((s['name'] for s in self.services if s.get('id') == selected_service_id), None)
+                if selected_name:
+                    self.graph.title(f"Service Latency Comparison (Selected: {selected_name})")
+                else:
+                    self.graph.title("Service Latency Comparison")
+            else:
+                self.graph.title("Service Latency Comparison")
+                
+            # Plot data for all services
+            colors = ["red", "blue", "green", "yellow", "purple", "orange", "cyan", "magenta"]
+            for idx, service in enumerate(self.services):
+                service_id = service.get("id", str(uuid.uuid4()))
+                service_history = self.get_service_history(service_id)
+                
+                # Extract latency values and ensure they are valid numbers
+                latency_data = []
+                for entry in service_history:
+                    latency = entry.get("latency")
+                    if latency is not None and isinstance(latency, (int, float)):
+                        latency_data.append(float(latency) * 1000)  # Convert to ms
+                
+                # Only plot if we have data
+                if latency_data and len(latency_data) > 0:
+                    # Ensure we have at least two data points for plotting
+                    if len(latency_data) == 1:
+                        # If only one point, duplicate it to have at least two points
+                        latency_data = latency_data + latency_data
+                    
+                    # Use a different color for each service (cycle through colors list)
+                    color = colors[idx % len(colors)]
+                    
+                    # Highlight the selected service with a thicker line
+                    if service_id == selected_service_id:
+                        # Plot selected service with a different marker and thicker line
+                        self.graph.plot(latency_data, label=service['name'], marker="dot", color=color)
+                    else:
+                        self.graph.plot(latency_data, label=service['name'], marker="braille", color=color)
+            
+            # Only refresh the plot if we have services to display
+            if self.services:
+                service_plot = self.query_one(PlotextPlot)
+                service_plot.refresh()
+                
+        except Exception as e:
+            print(f"[DEBUG] Error updating latency graph: {e}")
             import traceback
             traceback.print_exc()
 
@@ -1354,6 +1384,12 @@ class HertzDashboard(App):
                         print(f"[DEBUG] Error clearing table: {e}")
 
                 self.save_services_to_config()
+                
+                # Update the graph to reflect removed service
+                self.update_latency_graph()
+                
+                # Update the service details panel
+                self.update_service_details(self.current_service)
 
                 self.show_notification(f"Service '{service_name}' deleted", severity="information")
 
@@ -1365,7 +1401,7 @@ class HertzDashboard(App):
                     self.update_status(f"Service '{service_name}' removed. {len(self.services)} services remaining.")
             else:
                 self.show_notification(f"Could not find service with ID '{service_id}'", severity="error")
-    
+
         # Show the confirmation modal
         self.push_screen(DeleteConfirmationModal(service_name, service_id), callback=delete_service_callback)
             
