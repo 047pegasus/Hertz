@@ -1,1 +1,17 @@
-[{"name": "Test Service", "url": "http://localhost:3000", "path": "/", "check_interval": 3}]
+[
+    {
+        "id": "7ef00c8d-f03e-4424-85a5-2ad07cbe261a",
+        "name": "Test SVC 01",
+        "url": "http://localhost:5432",
+        "path": "/",
+        "check_interval": 10,
+        "last_check": {
+            "timestamp": "2025-05-04T04:38:53.823186",
+            "status": "UP",
+            "latency": 0.001656
+        },
+        "status": "UP",
+        "consecutive_down": 0,
+        "alerted": false
+    }
+]
